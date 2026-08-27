@@ -72,14 +72,20 @@ class HardwareConfig:
     def get_station_id() -> int:
         """Read the station ID from the DIP switches."""
         bit1 = machine.Pin(13, machine.Pin.IN, machine.Pin.PULL_UP)
+        
         # BUG-H fix: GPIO 12 is an ESP32 strapping pin. HIGH at boot => 1.8V flash mode
-        # (brownout/corrupted boot). PULL_DOWN keeps it safely LOW when switch is open.
-        bit2 = machine.Pin(12, machine.Pin.IN, machine.Pin.PULL_DOWN)
+        # We temporarily set PULL_UP to correctly read the DIP switch (connected to GND),
+        # and immediately set it back to PULL_DOWN to be safe for any future soft reboots.
+        bit2 = machine.Pin(12, machine.Pin.IN, machine.Pin.PULL_UP)
+        
         bit3 = machine.Pin(14, machine.Pin.IN, machine.Pin.PULL_UP)
         bit4 = machine.Pin(27, machine.Pin.IN, machine.Pin.PULL_UP)
 
         list_of_bits = [bit1, bit2, bit3, bit4]
         binary_list = [str(b.value()) for b in list_of_bits]
+        
+        # Revert pin 12 to PULL_DOWN to keep device safe for resets
+        machine.Pin(12, machine.Pin.IN, machine.Pin.PULL_DOWN)
         
         binary_string = "".join(binary_list)
         decimal_num = int(binary_string, 2)
