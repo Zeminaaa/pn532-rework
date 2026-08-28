@@ -125,6 +125,13 @@ class SlaveSyncNode:
         logger.info("--- SENDING ACK ---")
         try:
             msg = b'ACK' + bytes([self.station_id])
+            # Stagger ACK transmissions so slaves don't all shout at the master
+            # simultaneously. Each station waits (station_id * 200ms) before its
+            # burst, giving the master a clean window to receive each one in turn.
+            # E.g. ID 1 -> 200ms, ID 2 -> 400ms, ID 5 -> 1000ms.
+            stagger_delay = self.station_id * 0.2
+            logger.info(f"Čekám {stagger_delay:.1f}s (stagger) před odesláním ACK (ID {self.station_id})...")
+            time.sleep(stagger_delay)
             logger.info(f"Odesílám ACK (ID {self.station_id}) 5x...")
             for _ in range(5):
                 e.send(broadcast, msg)
