@@ -106,6 +106,9 @@ def main() -> None:
                 if done:
                     _log('Vsechny stanice synchronizovany.')
                     state['mode'] = 'READING'
+                    # Preserve the final synced set before discarding the manager
+                    # so the UI counter remains correct during READING mode.
+                    state['synced_ids'] = sync_manager.synced_ids.copy()
                     sync_manager = None
             
             elif state['mode'] == 'READING' or state['mode'] == 'IDLE':
