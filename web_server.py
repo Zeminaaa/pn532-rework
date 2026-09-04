@@ -268,12 +268,14 @@ class DashboardServer:
         s_ids_str = "[" + ",".join([str(x) for x in s_ids]) + "]"
         
         reads_json = []
-        for r in reads:
+        for idx, r in enumerate(reads):
             uid = r['uid']
             ts = r['ts']
             m_time = r['master_time']
+            name = self._esc(r.get('name', ''))
+            row_id = r.get('id', idx)
             times_arr = "[" + ",".join([f'"{x}"' for x in r['times']]) + "]"
-            reads_json.append(f'{{"uid":"{uid}","ts":"{ts}","master_time":"{m_time}","times":{times_arr}}}')
+            reads_json.append(f'{{"id":{row_id},"name":"{name}","uid":"{uid}","ts":"{ts}","master_time":"{m_time}","times":{times_arr}}}')
         reads_str = "[" + ",".join(reads_json) + "]"
 
         table_rows_str = self._table_rows_str(reads, n_st)
