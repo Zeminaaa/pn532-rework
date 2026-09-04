@@ -152,7 +152,15 @@ class DashboardServer:
             n = 8
             if '?n=' in path:
                 n = int(path.split('?n=')[1].split('&')[0])
+            ts = 0
+            if '&ts=' in path:
+                try:
+                    ts = int(path.split('&ts=')[1].split('&')[0])
+                except Exception:
+                    pass
             self.set_mode('SYNCING', n)
+            if ts > 0:
+                self.get_state()['sync_wall_seconds'] = ts
             conn.send(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true}")
         except Exception:
             conn.send(b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{\"ok\":false,\"error\":\"Neplatny pocet stanic\"}")
@@ -181,33 +189,106 @@ class DashboardServer:
         state = self.get_state()
         reads = state.get('chip_readings', [])
         visible_count = state.get('num_stations', 0)
-        csv_str = self._csv_from_rows(reads, visible_count)
+        # sync_wall_seconds = real-world seconds-since-midnight at sync start,
+        # recorded by master_main when the operator pressed "Spustit synchronizaci".
+        sync_wall_seconds = state.get('sync_wall_seconds', 0)
+        csv_str = self._csv_from_rows(reads, visible_count, sync_wall_seconds)
+        # UTF-8 BOM prepended so Czech characters render correctly in Excel
         conn.send(b"HTTP/1.1 200 OK\r\nContent-Type: text/csv; charset=utf-8\r\nContent-Disposition: attachment; filename=results.csv\r\n\r\n")
+        conn.send(b'\xef\xbb\xbf')
         conn.send(csv_str.encode('utf-8'))
 
-    def _csv_from_rows(self, reads: list, visible_count: int) -> str:
-        headers = ['jmeno', 'uid']
-        for index in range(visible_count):
-            headers.append(f'S{index + 1}')
-        headers.extend(['vysledek_s', 'cas_cteni'])
-        lines = [','.join(headers)]
+    def _format_duration(self, seconds) -> str:
+        """Convert a seconds integer to MM:SS or HH:MM:SS (omits hours if under 1 hour)."""
+        try:
+            total = int(seconds)
+        except (ValueError, TypeError):
+            return ''
+        if total < 0:
+            return ''
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        if h > 0:
+            return '%d:%02d:%02d' % (h, m, s)
+        return '%02d:%02d' % (m, s)
+
+    def _parse_hhmmss(self, ts_str: str):
+        """Parse a HH:MM:SS string into total seconds since midnight. Returns None on failure."""
+        try:
+            parts = ts_str.split(':')
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        except Exception:
+            return None
+
+    def _seconds_to_hhmmss(self, total_seconds) -> str:
+        """Format total seconds as HH:MM:SS, wrapping correctly around midnight."""
+        try:
+            s = int(total_seconds) % 86400
+            if s < 0:
+                s += 86400
+            return '%02d:%02d:%02d' % (s // 3600, (s % 3600) // 60, s % 60)
+        except Exception:
+            return ''
+
+    def _csv_from_rows(self, reads: list, visible_count: int, sync_wall_seconds: int = 0) -> str:
+        # Semicolon delimiter for Czech regional Excel/Calc compatibility
+        SEP = ';'
+        # First station becomes 'start'; remaining stations keep their number
+        headers = ['jméno', 'uid', 'start']
+        for index in range(1, visible_count):
+            headers.append('stanice %d' % (index + 1))
+        headers.extend(['výsledek', 'čas v cíli'])
+        lines = [SEP.join(headers)]
+
         for idx, row in enumerate(reads):
             res = self._result_seconds(row, visible_count)
-            res_str = "" if res is None else str(res)
-            values = [row.get('name', ''), row.get('uid', '')]
+            res_str = '' if res is None else self._format_duration(res)
+
             times = row.get('times', [])
-            for index in range(visible_count):
-                values.append(times[index] if index < len(times) else '0')
+            try:
+                start_tick = int(times[0]) if times else 0
+            except (ValueError, TypeError):
+                start_tick = 0
+
+            # start = real-world time when runner passed station 1:
+            #   sync_wall_seconds (real clock at sync) + times[0] (seconds since sync at station 1)
+            start_wall = self._seconds_to_hhmmss(sync_wall_seconds + start_tick)
+
+            values = [row.get('name', ''), row.get('uid', ''), start_wall]
+
+            # Stations 2..N: elapsed time since station 1 (start), as duration MM:SS / HH:MM:SS
+            for index in range(1, visible_count):
+                raw = times[index] if index < len(times) else None
+                try:
+                    val = int(raw) if raw is not None else 0
+                    elapsed = val - start_tick
+                    if elapsed < 0:
+                        elapsed += 65536  # 16-bit counter wrap-around
+                    values.append(self._format_duration(elapsed) if elapsed > 0 else '')
+                except (ValueError, TypeError):
+                    values.append('')
+
             values.append(res_str)
-            values.append(row.get('ts', ''))
-            lines.append(','.join(self._csv_cell(value) for value in values))
+
+            # čas čtení = real-world time when master scanned the chip at finish:
+            #   sync_wall_seconds + master_time (seconds since sync at master scan)
+            try:
+                master_tick = int(row.get('master_time', 0))
+            except (ValueError, TypeError):
+                master_tick = 0
+            finish_wall = self._seconds_to_hhmmss(sync_wall_seconds + master_tick)
+            values.append(finish_wall)
+
+            lines.append(SEP.join(self._csv_cell(value, SEP) for value in values))
+
         return '\r\n'.join(lines) + '\r\n'
 
-    def _csv_cell(self, value) -> str:
+    def _csv_cell(self, value, sep=',') -> str:
         text = str(value)
         if '"' in text:
             text = text.replace('"', '""')
-        if ',' in text or '"' in text or '\n' in text or '\r' in text:
+        if sep in text or '"' in text or '\n' in text or '\r' in text:
             text = '"' + text + '"'
         return text
 
@@ -238,14 +319,23 @@ class DashboardServer:
             finish += 65536
         return finish - start
 
-    def _table_rows_str(self, reads: list, station_count: int) -> str:
+    def _table_rows_str(self, reads: list, station_count: int, sync_wall_seconds: int = 0) -> str:
         rows = []
         for idx, r in enumerate(reads):
             res = self._result_seconds(r, station_count)
             res_str = str(res) if res is not None else "null"
             name = self._esc(r.get('name', ''))
             uid = self._esc(r.get('uid', ''))
-            ts = self._esc(r.get('ts', ''))
+            
+            try:
+                master_tick = int(r.get('master_time', 0))
+            except (ValueError, TypeError):
+                master_tick = 0
+            
+            finish_wall = self._seconds_to_hhmmss(sync_wall_seconds + master_tick)
+            if not finish_wall:
+                finish_wall = self._esc(r.get('ts', ''))
+                
             row_id = r.get('id', idx)
             times = r.get('times', [])
             s_fields = []
@@ -255,7 +345,7 @@ class DashboardServer:
             s_fields_str = ",".join(s_fields)
             if s_fields_str:
                 s_fields_str = "," + s_fields_str
-            rows.append(f'{{"id":{row_id},"name":"{name}","uid":"{uid}","read_at":"{ts}","result_seconds":{res_str}{s_fields_str}}}')
+            rows.append(f'{{"id":{row_id},"name":"{name}","uid":"{uid}","read_at":"{finish_wall}","result_seconds":{res_str}{s_fields_str}}}')
         return "[" + ",".join(rows) + "]"
 
     def _make_json(self, state: dict) -> str:
@@ -264,6 +354,7 @@ class DashboardServer:
         s_ids = list(state.get('synced_ids', []))
         reads = state.get('chip_readings', [])
         log = state.get('log', [])
+        sync_wall_seconds = state.get('sync_wall_seconds', 0)
 
         s_ids_str = "[" + ",".join([str(x) for x in s_ids]) + "]"
         
@@ -278,7 +369,7 @@ class DashboardServer:
             reads_json.append(f'{{"id":{row_id},"name":"{name}","uid":"{uid}","ts":"{ts}","master_time":"{m_time}","times":{times_arr}}}')
         reads_str = "[" + ",".join(reads_json) + "]"
 
-        table_rows_str = self._table_rows_str(reads, n_st)
+        table_rows_str = self._table_rows_str(reads, n_st, sync_wall_seconds)
         log_str = "[" + ",".join([f'"{self._esc(x)}"' for x in log]) + "]"
 
         return f'{{"mode":"{mode}","num_stations":{n_st},"total_station_count":{n_st},"visible_station_count":{n_st},"synced_ids":{s_ids_str},"chip_readings":{reads_str},"table_rows":{table_rows_str},"log":{log_str}}}'
